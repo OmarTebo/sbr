@@ -1,5 +1,5 @@
-﻿#include "Config.h" // for STEPS_PER_DEGREE etc.
-#include "HardwareMap.h" // optional: provides LEFT_STEP, LEFT_DIR, etc.
+#include "Config.h"
+#include "HardwareMap.h"
 #include "BotController.h"
 #include "test_mode.h"
 #include <Preferences.h>
@@ -18,18 +18,18 @@ BotController::BotController() :
   portMUX_INITIALIZE(&mux);
   pendingPid = false;
   stepsPerDegree = STEPS_PER_DEGREE;
-  testModeRuntime = TEST_MODE_RUNTIME; // Initialize from config
+  testModeRuntime = TEST_MODE_RUNTIME;
+  controlMode = ControlMode::AUTO;
+  emergencyStopActive = false;
 }
 
 void BotController::begin() {
-  // Print boot tag for firmware identification
   Serial.printf("BOOT_TAG: %s\n", BOOT_TAG);
   
   leftMotor.begin();
   rightMotor.begin();
-  // init display
   display.begin();
-  // init IMU with retry+recover on failure
+  
   if (!imu.begin()) {
     Serial.println("IMU init failed — attempting I2C recover + retry");
     IMU::i2cBusRecover(I2C_SDA_PIN, I2C_SCL_PIN);
@@ -40,21 +40,85 @@ void BotController::begin() {
       Serial.println("IMU init succeeded after recover.");
     }
   }
-  // ble.begin(); // Disabled for now to avoid radio interference during DLPF runtime tuning. Re-enable if needed.
-  // default PID values (Kp, Ki, Kd) in degrees/deg-s/seconds form
+#if BLE_ENABLED
+  ble.begin();
+#endif
+
   loadStoredPid();
   
-  // Print test mode status
   if (TEST_MODE_ENABLED || testModeRuntime) {
     Serial.println("TEST_MODE: ENABLED (motors disabled)");
   }
+
+  Serial.printf("CONTROL_MODE: %d (0=AUTO, 1=MANUAL, 2=MIXED)\n", static_cast<uint8_t>(controlMode));
 }
 
 void BotController::update(float dt) {
-  // read imu
   imu.update(dt);
 
-  // check for pending BLE params and apply safely
+#if BLE_ENABLED
+  processBleCommands();
+#endif
+
+  float currentRoll = imu.getRoll();
+  float currentPitch = imu.getPitch();
+  float currentYaw = imu.getYaw();
+
+  static unsigned long _lastTelemetryMs = 0;
+  const unsigned long _telemetryIntervalMs = 20;
+  unsigned long _nowMs = millis();
+  if (_nowMs - _lastTelemetryMs >= _telemetryIntervalMs) {
+    _lastTelemetryMs = _nowMs;
+    Serial.printf("PITCH:%.2f ROLL:%.2f YAW:%.2f\n", currentPitch, currentRoll, currentYaw);
+#if BLE_ENABLED
+    sendBleTelemetry();
+#endif
+  }
+
+  if (TEST_MODE_ENABLED || testModeRuntime || emergencyStopActive) {
+    display.update();
+    return;
+  }
+
+  float leftSpeed = 0.0f;
+  float rightSpeed = 0.0f;
+
+#if BLE_ENABLED
+  if (controlMode == ControlMode::MANUAL) {
+    // Pure tank control - PID not used
+    // Speed is handled in processBleCommands() via applyTankControl()
+  } else {
+    // AUTO or MIXED: use PID
+    float rollOutDegPerSec = rollPid.compute(targetRoll, currentRoll, dt);
+    float rollStepsPerSec = rollOutDegPerSec * stepsPerDegree;
+    
+    float leftSign = LEFT_MOTOR_SIGN * (INVERT_LEFT_MOTOR ? -1.0f : 1.0f);
+    float rightSign = RIGHT_MOTOR_SIGN * (INVERT_RIGHT_MOTOR ? -1.0f : 1.0f);
+    
+    leftSpeed = rollStepsPerSec * leftSign;
+    rightSpeed = rollStepsPerSec * rightSign;
+  }
+#else
+  // No BLE: pure PID control
+  float rollOutDegPerSec = rollPid.compute(targetRoll, currentRoll, dt);
+  float rollStepsPerSec = rollOutDegPerSec * stepsPerDegree;
+  
+  float leftSign = LEFT_MOTOR_SIGN * (INVERT_LEFT_MOTOR ? -1.0f : 1.0f);
+  float rightSign = RIGHT_MOTOR_SIGN * (INVERT_RIGHT_MOTOR ? -1.0f : 1.0f);
+  
+  leftSpeed = rollStepsPerSec * leftSign;
+  rightSpeed = rollStepsPerSec * rightSign;
+#endif
+
+  leftMotor.setSpeedStepsPerSec(leftSpeed);
+  rightMotor.setSpeedStepsPerSec(rightSpeed);
+  leftMotor.runSpeed();
+  rightMotor.runSpeed();
+
+  display.update();
+}
+
+void BotController::processBleCommands() {
   PIDParams p;
   if (ble.takePending(p)) {
     portENTER_CRITICAL(&mux);
@@ -64,53 +128,97 @@ void BotController::update(float dt) {
   }
   if (pendingPid) applyPendingPid();
 
-  // Get current roll angle (x-axis rotation) - primary control axis
-  // Both motor shafts are parallel to x-axis, so both motors use roll for control
-  float currentRoll = imu.getRoll();
-  float currentPitch = imu.getPitch(); // Optional, kept for future use if MPU6050 rotated
-
-  // Non-blocking telemetry emit (throttled).
-  static unsigned long _lastTelemetryMs = 0;
-  const unsigned long _telemetryIntervalMs = 20; // 50 Hz
-  unsigned long _nowMs = millis();
-  if (_nowMs - _lastTelemetryMs >= _telemetryIntervalMs) {
-    _lastTelemetryMs = _nowMs;
-    Serial.printf("PITCH:%.2f ROLL:%.2f YAW:%.2f\n", currentPitch, currentRoll, imu.getYaw());
+  bool estop;
+  if (ble.takeEmergencyStop(estop)) {
+    emergencyStop();
   }
 
-  // Skip motor control in test mode (compile-time or runtime)
-  if (TEST_MODE_ENABLED || testModeRuntime) {
-    // In test mode, still update display but don't drive motors
-    display.update();
-    return;
+  ControlMode mode;
+  if (ble.takeControlMode(mode)) {
+    applyControlModeChange(mode);
   }
 
-  // PID compute: returns angular velocity (deg/s)
-  // Both motors rotate around x-axis, so roll is the primary control axis
-  // Pitch is optional (if MPU6050 rotated, but currently not used)
-  float rollOutDegPerSec = rollPid.compute(targetRoll, currentRoll, dt); // out in deg/s
-  float rollStepsPerSec = rollOutDegPerSec * stepsPerDegree; // convert to steps/sec once
+  TankControl tank;
+  if (ble.takeTankControl(tank)) {
+    applyTankControl(tank);
+  }
 
-  // Calculate base motor signs with invert flags
-  // This allows software testing without hardware rewiring
+  bool calib;
+  if (ble.takeCalibrationTrigger(calib)) {
+    Serial.println("BLE: Calibration triggered");
+    imu.calibrateBlocking();
+  }
+}
+
+void BotController::applyTankControl(const TankControl &tank) {
+  if (emergencyStopActive) return;
+
   float leftSign = LEFT_MOTOR_SIGN * (INVERT_LEFT_MOTOR ? -1.0f : 1.0f);
   float rightSign = RIGHT_MOTOR_SIGN * (INVERT_RIGHT_MOTOR ? -1.0f : 1.0f);
   
-  // apply motor sign configuration so left/right can be inverted without code edits
-  float leftSteps = rollStepsPerSec * leftSign;
-  float rightSteps = rollStepsPerSec * rightSign;
+  float leftSpeed = (tank.leftMotor / 100.0f) * MAX_TANK_SPEED * leftSign;
+  float rightSpeed = (tank.rightMotor / 100.0f) * MAX_TANK_SPEED * rightSign;
 
-  // drive both wheels from roll controller (non-blocking)
-  // Both motors respond to roll (x-axis rotation) together
-  leftMotor.setSpeedStepsPerSec(leftSteps);
-  rightMotor.setSpeedStepsPerSec(rightSteps);
-
-  // non-blocking stepper service (must be called frequently)
+  leftMotor.setSpeedStepsPerSec(leftSpeed);
+  rightMotor.setSpeedStepsPerSec(rightSpeed);
   leftMotor.runSpeed();
   rightMotor.runSpeed();
+}
 
-  // update display animation (throttled)
-  display.update();
+void BotController::applyControlModeChange(ControlMode mode) {
+  portENTER_CRITICAL(&mux);
+  controlMode = mode;
+  portEXIT_CRITICAL(&mux);
+  
+  const char* modeNames[] = {"AUTO", "MANUAL", "MIXED"};
+  Serial.printf("BLE: Control mode changed to %s\n", modeNames[static_cast<uint8_t>(mode)]);
+  
+  if (mode == ControlMode::MANUAL) {
+    rollPid.reset();
+  }
+}
+
+void BotController::sendBleTelemetry() {
+  TelemetryData data = getTelemetry();
+  ble.sendTelemetry(data);
+}
+
+TelemetryData BotController::getTelemetry() const {
+  TelemetryData data;
+  data.pitch = imu.getPitch();
+  data.roll = imu.getRoll();
+  data.yaw = imu.getYaw();
+  data.leftSpeed = 0; // Would need motor speed tracking
+  data.rightSpeed = 0;
+  data.mode = controlMode;
+  data.emergencyStop = emergencyStopActive;
+  return data;
+}
+
+void BotController::emergencyStop() {
+  portENTER_CRITICAL(&mux);
+  emergencyStopActive = true;
+  portEXIT_CRITICAL(&mux);
+  
+  leftMotor.setSpeedStepsPerSec(0);
+  rightMotor.setSpeedStepsPerSec(0);
+  
+  Serial.println("EMERGENCY STOP ACTIVATED");
+}
+
+void BotController::clearEmergencyStop() {
+  portENTER_CRITICAL(&mux);
+  emergencyStopActive = false;
+  portEXIT_CRITICAL(&mux);
+  
+  ble.clearEmergencyStop();
+  rollPid.reset();
+  
+  Serial.println("Emergency stop cleared");
+}
+
+void BotController::setControlMode(ControlMode mode) {
+  applyControlModeChange(mode);
 }
 
 void BotController::requestPidParams(const PIDParams &p) {
@@ -123,11 +231,8 @@ void BotController::requestPidParams(const PIDParams &p) {
 void BotController::applyPendingPid() {
   portENTER_CRITICAL(&mux);
   if (pendingPid) {
-    // interpret pendingParams as continuous (Kp, Ki_per_s, Kd_seconds)
-    // Apply to roll PID (primary controller for x-axis rotation)
     rollPid.setTunings(pendingParams.kp, pendingParams.ki, pendingParams.kd);
     rollPid.reset();
-    // persist immediately so values survive power cycles
     savePidToStorage(pendingParams.kp, pendingParams.ki, pendingParams.kd);
     pendingPid = false;
   }
@@ -142,12 +247,9 @@ void BotController::printCurrentPid() {
 
 void BotController::loadStoredPid() {
   Preferences prefs;
-  // open namespace for read/write
   if (!prefs.begin(PREFS_NAMESPACE, false)) {
     Serial.println("Prefs begin failed - using defaults");
-    // use compile-time defaults for roll PID (primary controller)
     rollPid.begin(DEFAULT_PID_KP, DEFAULT_PID_KI, DEFAULT_PID_KD, PID_OUTPUT_MIN_F, PID_OUTPUT_MAX_F);
-    // Initialize pitch PID with same defaults (optional, for future use)
     pitchPid.begin(DEFAULT_PID_KP, DEFAULT_PID_KI, DEFAULT_PID_KD, PID_OUTPUT_MIN_F, PID_OUTPUT_MAX_F);
     return;
   }
@@ -160,7 +262,6 @@ void BotController::loadStoredPid() {
 
   Serial.printf("Loaded Roll PID from NVS: KP=%.6f KI=%.6f KD=%.6f\n", kp, ki, kd);
   rollPid.begin(kp, ki, kd, PID_OUTPUT_MIN_F, PID_OUTPUT_MAX_F);
-  // Initialize pitch PID with same values (optional, for future use)
   pitchPid.begin(kp, ki, kd, PID_OUTPUT_MIN_F, PID_OUTPUT_MAX_F);
 }
 
@@ -187,7 +288,5 @@ void BotController::setTestMode(bool enabled) {
 }
 
 void BotController::runSelfChecks() {
-  // Run self-checks using the test_mode module
   bool allPassed = ::runSelfChecks(imu, leftMotor, rightMotor, display, ble, rollPid);
-  // Result is already printed by runSelfChecks()
 }

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "PIDController.h"
 #include "MotorDriver.h"
 #include "Config.h"
@@ -7,48 +7,68 @@
 #include "BLEHandler.h"
 #include "display.h"
 
-// Forward declaration
 class SerialBridge;
 
 class BotController {
 public:
   BotController();
   void begin();
-  // call every control tick
   void update(float dt);
-  void requestPidParams(const PIDParams &p); // request atomic apply
-  // print current pid to Serial
+  void requestPidParams(const PIDParams &p);
   void printCurrentPid();
   
   // Test mode control
   void setTestMode(bool enabled);
   bool isTestMode() const { return testModeRuntime; }
-  void runSelfChecks(); // Run self-checks (requires SerialBridge reference)
+  void runSelfChecks();
 
-  MotorDriver leftMotor;  // Left motor (rotates around x-axis, uses roll for control)
-  MotorDriver rightMotor; // Right motor (rotates around x-axis, uses roll for control)
+  // Control mode
+  void setControlMode(ControlMode mode);
+  ControlMode getControlMode() const { return controlMode; }
+
+  // Emergency stop
+  void emergencyStop();
+  bool isEmergencyStopActive() const { return emergencyStopActive; }
+  void clearEmergencyStop();
+
+  // Tank control (for serial/BLE)
+  void applyTankControl(const TankControl &tank);
+
+  // Telemetry access
+  TelemetryData getTelemetry() const;
+
+  // Motor access for telemetry
+  MotorDriver leftMotor;
+  MotorDriver rightMotor;
   
-  // Access to IMU for calibration commands
   IMU &getIMU() { return imu; }
 
-  // setpoint in degrees
   float targetPitch = 0.0f;
   float targetRoll = 0.0f;
 
 private:
   void loadStoredPid();
   void savePidToStorage(float kp, float ki, float kd);
+  void applyPendingPid();
+  void applyControlModeChange(ControlMode mode);
+  void processBleCommands();
+  void sendBleTelemetry();
+
   BLEHandler ble;
   portMUX_TYPE mux;
+
   volatile bool pendingPid;
   PIDParams pendingParams;
   float stepsPerDegree;
-  PIDController rollPid;  // Primary controller (both motors rotate around x-axis)
-  PIDController pitchPid; // Optional controller (if MPU6050 rotated, currently unused)
-  void applyPendingPid();
+  PIDController rollPid;
+  PIDController pitchPid;
+
   IMU imu;
   Display display;
-  bool testModeRuntime; // Runtime test mode flag
+  bool testModeRuntime;
+
+  volatile ControlMode controlMode;
+  volatile bool emergencyStopActive;
+
+  static constexpr float MAX_TANK_SPEED = 1000.0f;
 };
-
-
