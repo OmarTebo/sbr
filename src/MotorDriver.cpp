@@ -16,9 +16,8 @@ void MotorDriver::begin() {
   // Ensure stepper pins orientation default (no inversion)
   stepper.setPinsInverted(false, false, false);
 
-  // sensible defaults; you can tweak later
-  stepper.setAcceleration(1000.0f);
-  stepper.setMaxSpeed(1000.0f);
+  stepper.setAcceleration(MOTOR_DEFAULT_ACCELERATION);
+  stepper.setMaxSpeed(MOTOR_DEFAULT_MAX_SPEED);
 }
 
 void MotorDriver::setSpeedStepsPerSec(float stepsPerSec) {

@@ -62,6 +62,9 @@
 #define PREFS_KEY_IMU_DLPF_CFG   "dlpf_cfg"
 #define PREFS_KEY_IMU_SMPLRT     "dlpf_div"
 
+// IMU stall detection thresholds
+#define IMU_STALL_ANGLE_CHANGE_MIN 1e-5f  // Minimum angle change to detect frozen readings
+#define IMU_STALL_TIMEOUT_MS 200          // Timeout in ms to consider IMU stalled
 
 // Steps mapping (tune later)
 #define STEPS_PER_DEGREE (3200.0f/360.0f) // ≈ 8.8888889
@@ -90,6 +93,10 @@
 #define INVERT_LEFT_MOTOR false  // If true, invert left motor direction sign
 #define INVERT_RIGHT_MOTOR false  // If true, invert right motor direction sign
 
+// Motor driver defaults
+#define MOTOR_DEFAULT_ACCELERATION 1000.0f  // steps/s^2
+#define MOTOR_DEFAULT_MAX_SPEED 1000.0f     // steps/s
+
 // Display pins (LED Matrix)
 #define DISPLAY_DIN_PIN 23
 #define DISPLAY_CLK_PIN 18
@@ -106,6 +113,12 @@
 // Origin: Runtime test mode flag
 // Rationale: Allows toggling test mode via serial command for flexible testing
 #define TEST_MODE_RUNTIME false  // Runtime test mode flag (can be toggled via serial)
+
+// BLE configuration
+// Magic number: true
+// Origin: Enable BLE for remote PID tuning and tank control
+// Rationale: Set to true to enable BLE for remote PID tuning and tank control
+#define BLE_ENABLED true
 
 // Boot tag for firmware identification
 // Format: "pcb-v2-prototype-N" where N increments with each code change during prototyping

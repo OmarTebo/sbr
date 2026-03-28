@@ -23,6 +23,7 @@ void PIDController::setTunings(float _kp, float _ki, float _kd) {
   kp = _kp;
   ki = _ki;
   kd = _kd;
+  reset();
 }
 
 void PIDController::setTuningsContinuous(float Kp, float Ki_per_s, float Kd_seconds, float sampleRateHz) {
@@ -36,31 +37,32 @@ float PIDController::compute(float setpoint, float measurement, float dt_s) {
   if (dt_s <= 0.0f) return 0.0f;
   float error = setpoint - measurement; // degrees
 
-  // P term (deg * unitless kp) -> units: deg * kp (interpreted as deg/s contribution depending on kp units)
+  // P term: kp (unitless) * error (deg) = P_contribution
+  // Output unit: deg (interpreted as deg/s with proper kp tuning)
   float P = kp * error;
 
-  // I term (continuous Ki_per_s): integral accumulates error * dt (deg * s)
+  // I term: ki (1/s) * integral(error*dt) = ki * (deg*s) = I_contribution (deg/s)
+  // integral accumulates error * dt (deg * s)
   integral += error * dt_s;
   // anti-windup: prevent integral growing beyond what would saturate output
   float integralLimit = 0.0f;
   if (ki != 0.0f) {
-    // out = ki * integral when I dominates; to keep magnitude bounded, limit integral to outMax/ki
     integralLimit = fabs(outMax / (ki != 0.0f ? ki : 1.0f));
   } else {
     integralLimit = 1e6f;
   }
   if (integral > integralLimit) integral = integralLimit;
   if (integral < -integralLimit) integral = -integralLimit;
-  float I = ki * integral; // units: (1/s) * (deg*s) => deg
+  float I = ki * integral; // units: (1/s) * (deg*s) => deg (interpreted as deg/s)
 
-  // D term: derivative of error (deg/s)
+  // D term: kd (s) * derivative(error) (deg/s) = D_contribution (deg/s)
   float d_raw = (error - prevError) / dt_s;
   derivFiltered = d_alpha * d_raw + (1.0f - d_alpha) * derivFiltered;
-  float D = kd * derivFiltered; // kd (seconds) * (deg/s) => deg
+  float D = kd * derivFiltered; // units: s * deg/s => deg (interpreted as deg/s)
 
   prevError = error;
 
-  // Sum terms. Because we want output to be angular velocity (deg/s), choose kp/ki/kd accordingly when tuning.
+  // Sum all terms. Tuned with continuous-time gains, output is angular velocity (deg/s)
   float out = P + I + D;
 
   // clamp

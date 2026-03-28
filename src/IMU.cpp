@@ -359,16 +359,17 @@ void IMU::update(float dt) {
   newRoll  -= rollOffset;
 
   // detect stall / frozen readings: tiny change over a period
-  if (fabsf(newPitch - oldPitch) < 1e-5f && fabsf(newRoll - oldRoll) < 1e-5f &&
-      (lastMillis != 0) && (millis() - lastMillis) > 200) {
+  if (fabsf(newPitch - oldPitch) < IMU_STALL_ANGLE_CHANGE_MIN && 
+      fabsf(newRoll - oldRoll) < IMU_STALL_ANGLE_CHANGE_MIN &&
+      (lastMillis != 0) && (millis() - lastMillis) > IMU_STALL_TIMEOUT_MS) {
     Serial.println("IMU stalled — attempting I2C recover + reinit");
     IMU::i2cBusRecover(I2C_SDA_PIN, I2C_SCL_PIN);
     // try reinit addresses again
     if (mpu) { delete mpu; mpu = nullptr; }
-    mpu = new MPU6050(Wire, 0x68);
+    mpu = new MPU6050(Wire, MPU_ADDR_DEFAULT);
     if (!mpu->begin()) {
       delete mpu;
-      mpu = new MPU6050(Wire, 0x69);
+      mpu = new MPU6050(Wire, MPU_ADDR_ALT);
       if (!mpu->begin()) {
         Serial.println("IMU reinit failed.");
         delete mpu; mpu = nullptr;
